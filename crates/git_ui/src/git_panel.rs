@@ -267,6 +267,7 @@ struct SerializedGitPanel {
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 enum Section {
     Conflict,
+    Staged,
     Tracked,
     New,
 }
@@ -284,6 +285,13 @@ impl GitHeaderEntry {
             Section::Conflict => {
                 repo.had_conflict_on_last_merge_head_change(&status_entry.repo_path)
             }
+            Section::Staged => {
+                !status.is_created()
+                    && matches!(
+                        status_entry.staging,
+                        StageStatus::Staged | StageStatus::PartiallyStaged
+                    )
+            }
             Section::Tracked => !status.is_created(),
             Section::New => status.is_created(),
         }
@@ -291,6 +299,7 @@ impl GitHeaderEntry {
     pub fn title(&self) -> &'static str {
         match self.header {
             Section::Conflict => "Conflicts",
+            Section::Staged => "Staged",
             Section::Tracked => "Tracked",
             Section::New => "Untracked",
         }
@@ -3504,6 +3513,7 @@ impl GitPanel {
         let is_tree_view = matches!(self.view_mode, GitPanelViewMode::Tree(_));
         let group_by_status = is_tree_view || !sort_by_path;
 
+        let mut staged_entries = Vec::new();
         let mut changed_entries = Vec::new();
         let mut new_entries = Vec::new();
         let mut conflict_entries = Vec::new();
@@ -3554,6 +3564,10 @@ impl GitPanel {
                 conflict_entries.push(entry);
             } else if group_by_status && is_new {
                 new_entries.push(entry);
+            } else if group_by_status
+                && matches!(staging, StageStatus::Staged | StageStatus::PartiallyStaged)
+            {
+                staged_entries.push(entry);
             } else {
                 changed_entries.push(entry);
             }
@@ -3618,6 +3632,7 @@ impl GitPanel {
             () => {
                 [
                     (Section::Conflict, std::mem::take(&mut conflict_entries)),
+                    (Section::Staged, std::mem::take(&mut staged_entries)),
                     (Section::Tracked, std::mem::take(&mut changed_entries)),
                     (Section::New, std::mem::take(&mut new_entries)),
                 ]
@@ -3718,6 +3733,7 @@ impl GitPanel {
     fn header_state(&self, header_type: Section) -> ToggleState {
         let (staged_count, count) = match header_type {
             Section::New => (self.new_staged_count, self.new_count),
+            Section::Staged => (self.tracked_staged_count, self.tracked_staged_count),
             Section::Tracked => (self.tracked_staged_count, self.tracked_count),
             Section::Conflict => (self.conflicted_staged_count, self.conflicted_count),
         };
@@ -5159,48 +5175,69 @@ impl GitPanel {
                     .id(checkbox_wrapper_id)
                     .flex_none()
                     .occlude()
-                    .cursor_pointer()
                     .child(
-                        Checkbox::new(checkbox_id, is_staged)
-                            .disabled(!has_write_access)
-                            .fill()
-                            .elevation(ElevationIndex::Surface)
-                            .on_click_ext({
-                                let entry = entry.clone();
-                                let this = cx.weak_entity();
-                                move |_, click, window, cx| {
-                                    this.update(cx, |this, cx| {
-                                        if !has_write_access {
-                                            return;
-                                        }
-                                        if click.modifiers().shift {
-                                            this.stage_bulk(ix, cx);
-                                        } else {
-                                            let list_entry =
-                                                if GitPanelSettings::get_global(cx).tree_view {
-                                                    GitListEntry::TreeStatus(GitTreeStatusEntry {
-                                                        entry: entry.clone(),
-                                                        depth,
-                                                    })
-                                                } else {
-                                                    GitListEntry::Status(entry.clone())
-                                                };
-                                            this.toggle_staged_for_entry(&list_entry, window, cx);
-                                        }
-                                        cx.stop_propagation();
-                                    })
-                                    .ok();
-                                }
-                            })
-                            .tooltip(move |_window, cx| {
-                                let action = match stage_status {
-                                    StageStatus::Staged => "Unstage",
-                                    StageStatus::Unstaged | StageStatus::PartiallyStaged => "Stage",
-                                };
-                                let tooltip_name = action.to_string();
-
-                                Tooltip::for_action(tooltip_name, &ToggleStaged, cx)
-                            }),
+                        h_flex()
+                            .gap_0p5()
+                            .when(
+                                stage_status != StageStatus::Staged && has_write_access,
+                                |this| {
+                                    let entry = entry.clone();
+                                    let this_panel = cx.weak_entity();
+                                    this.child(
+                                        IconButton::new(
+                                            ElementId::Name(
+                                                format!("stage-{}", checkbox_id).into(),
+                                            ),
+                                            IconName::Plus,
+                                        )
+                                        .icon_size(IconSize::XSmall)
+                                        .tooltip(|_window, cx| {
+                                            Tooltip::for_action("Stage", &ToggleStaged, cx)
+                                        })
+                                        .on_click(move |_, _window, cx| {
+                                            this_panel
+                                                .update(cx, |this, cx| {
+                                                    this.change_file_stage(
+                                                        true,
+                                                        vec![entry.clone()],
+                                                        cx,
+                                                    );
+                                                })
+                                                .ok();
+                                        }),
+                                    )
+                                },
+                            )
+                            .when(
+                                stage_status != StageStatus::Unstaged && has_write_access,
+                                |this| {
+                                    let entry = entry.clone();
+                                    let this_panel = cx.weak_entity();
+                                    this.child(
+                                        IconButton::new(
+                                            ElementId::Name(
+                                                format!("unstage-{}", checkbox_id).into(),
+                                            ),
+                                            IconName::Dash,
+                                        )
+                                        .icon_size(IconSize::XSmall)
+                                        .tooltip(|_window, cx| {
+                                            Tooltip::for_action("Unstage", &ToggleStaged, cx)
+                                        })
+                                        .on_click(move |_, _window, cx| {
+                                            this_panel
+                                                .update(cx, |this, cx| {
+                                                    this.change_file_stage(
+                                                        false,
+                                                        vec![entry.clone()],
+                                                        cx,
+                                                    );
+                                                })
+                                                .ok();
+                                        }),
+                                    )
+                                },
+                            ),
                     ),
             )
             .on_click({
